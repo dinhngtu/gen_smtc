@@ -84,20 +84,18 @@ std::wstring GetMetadata(const std::wstring& filename, const std::wstring& field
     return std::wstring(&ret[0]);
 }
 
-BITMAPINFO bmi;
 HBITMAP srcBMP = nullptr;
-ARGB32* cur_image = nullptr;
 
 HBITMAP GetAlbumArt(const std::wstring& filename, const std::wstring& type) {
-    static int cur_w, cur_h;
-    if (cur_image) {
-        memmgrApi->sysFree(cur_image);
-        cur_image = nullptr;
-    }
+    int cur_w, cur_h;
+    ARGB32* cur_image = nullptr;
 
     if (albumartApi->GetAlbumArt(filename.c_str(), type.c_str(), &cur_w, &cur_h, &cur_image) == ALBUMART_SUCCESS) {
-        if (srcBMP) DeleteObject(srcBMP);
+        if (srcBMP) {
+            DeleteObject(srcBMP);
+        }
 
+        BITMAPINFO bmi;
         ZeroMemory(&bmi, sizeof bmi);
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = cur_w;
@@ -113,7 +111,12 @@ HBITMAP GetAlbumArt(const std::wstring& filename, const std::wstring& type) {
         void* bits = 0;
 
         srcBMP = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+        winrt::check_pointer(srcBMP);
         memcpy(bits, cur_image, cur_w * cur_h * 4);
+        if (cur_image) {
+            memmgrApi->sysFree(cur_image);
+            cur_image = nullptr;
+        }
 
         return srcBMP;
     }
@@ -133,11 +136,10 @@ RandomAccessStreamReference GetThumbnailStream(HBITMAP bmp) {
     winrt::com_ptr<IStream> stream;
     winrt::check_hresult(CreateStreamOnHGlobal(nullptr, TRUE, stream.put()));
 
-    LONG isize;
-    pict->SaveAsFile(stream.get(), TRUE, &isize);
+    winrt::check_hresult(pict->SaveAsFile(stream.get(), TRUE, nullptr));
 
     winrt::com_ptr<ABI::Windows::Storage::Streams::IRandomAccessStream> outstream;
-    CreateRandomAccessStreamOverStream(stream.get(), BSOS_DEFAULT, IID_PPV_ARGS(outstream.put()));
+    winrt::check_hresult(CreateRandomAccessStreamOverStream(stream.get(), BSOS_DEFAULT, IID_PPV_ARGS(outstream.put())));
 
     return RandomAccessStreamReference::CreateFromStream(outstream.as<IRandomAccessStream>());
 }
