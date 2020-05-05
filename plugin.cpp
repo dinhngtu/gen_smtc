@@ -118,6 +118,42 @@ HBITMAP GetAlbumArt(const std::wstring& filename, const std::wstring& type) {
             cur_image = nullptr;
         }
 
+        int sw = cur_w;
+        int sh = cur_h;
+        // thumbnail is 100x100
+        if (sw > sh && sw > 100) {
+            sh = sh * 100 / sw;
+            sw = 100;
+        } else if (sh > sw && sh > 100) {
+            sw = sw * 100 / sh;
+            sh = 100;
+        }
+        if (sw != cur_w) {
+            HDC srcDC = CreateCompatibleDC(NULL);
+            winrt::check_pointer(srcDC);
+            HGDIOBJ oldSrc = SelectObject(srcDC, srcBMP);
+
+            HDC screenDC = GetDC(NULL);
+            HBITMAP sizedBmp = CreateCompatibleBitmap(screenDC, sw, sh);
+            winrt::check_pointer(sizedBmp);
+
+            HDC sizedDC = CreateCompatibleDC(srcDC);
+            winrt::check_pointer(sizedDC);
+            HGDIOBJ oldSized = SelectObject(sizedDC, sizedBmp);
+
+            winrt::check_bool(SetStretchBltMode(sizedDC, HALFTONE));
+            winrt::check_bool(StretchBlt(sizedDC, 0, 0, sw, sh, srcDC, 0, 0, cur_w, cur_h, SRCCOPY));
+
+            SelectObject(srcDC, oldSrc);
+            SelectObject(sizedDC, oldSized);
+            DeleteDC(srcDC);
+            DeleteDC(sizedDC);
+            ReleaseDC(NULL, screenDC);
+
+            DeleteObject(srcBMP);
+            srcBMP = sizedBmp;
+        }
+
         return srcBMP;
     }
 
