@@ -26,16 +26,19 @@
 #include "api/memmgr/api_memmgr.h"
 #include "AlbumArt/api_albumart.h"
 
+constexpr auto THUMBNAIL_SIZE = 100;
+
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Windows::Media;
 using namespace winrt::Windows::Storage::Streams;
 using namespace ::Windows::Storage::Streams;
 
-int init();
-void config();
-void quit();
+static int init();
+static void config();
+static void quit();
+static void onButtonPressed(const SystemMediaTransportControls&, const SystemMediaTransportControlsButtonPressedEventArgs&);
 
-winampGeneralPurposePlugin plugin = {
+static winampGeneralPurposePlugin plugin = {
     GPPHDR_VER,
     _strdup("Windows 10 Media Controls Integration"),
     init,
@@ -46,21 +49,27 @@ extern "C" __declspec(dllexport) winampGeneralPurposePlugin * winampGetGeneralPu
     return &plugin;
 }
 
-api_service* serviceApi;
-api_memmgr* memmgrApi;
-api_albumart* albumartApi;
+static api_service* serviceApi;
+static api_memmgr* memmgrApi;
+static api_albumart* albumartApi;
 
-SystemMediaTransportControls make_smtc(const winampGeneralPurposePlugin* plugin) {
+static SystemMediaTransportControls smtc{ nullptr };
+static winrt::event_token buttonPressedToken{};
+static TypedEventHandler<SystemMediaTransportControls, SystemMediaTransportControlsButtonPressedEventArgs> buttonPressedHandler(onButtonPressed);
+
+static bool enabled = true;
+static WNDPROC windowProcOld;
+
+static HBITMAP srcBMP = nullptr;
+
+static SystemMediaTransportControls makeSmtc(const winampGeneralPurposePlugin* plugin) {
     winrt::com_ptr<ABI::Windows::Media::ISystemMediaTransportControls> ismtc;
     auto factory = winrt::get_activation_factory<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>();
     auto result = factory->GetForWindow(plugin->hwndParent, IID_PPV_ARGS(ismtc.put()));
     return ismtc.as<SystemMediaTransportControls>();
 }
 
-SystemMediaTransportControls smtc{ nullptr };
-winrt::event_token smtc_buttonPressed_token{};
-
-void updateStatus() {
+static void updateStatus() {
     int status = SendMessage(plugin.hwndParent, WM_WA_IPC, 0, IPC_ISPLAYING);
     switch (status) {
     case 0:
@@ -75,20 +84,19 @@ void updateStatus() {
     }
 }
 
-std::wstring GetMetadata(const std::wstring& filename, const std::wstring& field) {
-    extendedFileInfoStructW fi;
+static std::wstring getMetadata(const std::wstring& filename, const std::wstring& field) {
+    extendedFileInfoStructW fi{};
     fi.filename = filename.c_str();
     fi.metadata = field.c_str();
     std::vector<wchar_t> ret(1024);
     fi.ret = &ret[0];
     fi.retlen = ret.size();
     SendMessage(plugin.hwndParent, WM_WA_IPC, (WPARAM)&fi, IPC_GET_EXTENDED_FILE_INFOW);
+    *ret.end() = 0;
     return std::wstring(&ret[0]);
 }
 
-HBITMAP srcBMP = nullptr;
-
-HBITMAP GetAlbumArt(const std::wstring& filename, const std::wstring& type) {
+static HBITMAP getAlbumArt(const std::wstring& filename, const std::wstring& type) {
     int cur_w, cur_h;
     ARGB32* cur_image = nullptr;
 
@@ -122,13 +130,12 @@ HBITMAP GetAlbumArt(const std::wstring& filename, const std::wstring& type) {
 
         int sw = cur_w;
         int sh = cur_h;
-        // thumbnail is 100x100
-        if (sw > sh && sw > 100) {
-            sh = sh * 100 / sw;
-            sw = 100;
-        } else if (sh > sw && sh > 100) {
-            sw = sw * 100 / sh;
-            sh = 100;
+        if (sw > sh && sw > THUMBNAIL_SIZE) {
+            sh = sh * THUMBNAIL_SIZE / sw;
+            sw = THUMBNAIL_SIZE;
+        } else if (sh > sw && sh > THUMBNAIL_SIZE) {
+            sw = sw * THUMBNAIL_SIZE / sh;
+            sh = THUMBNAIL_SIZE;
         }
         if (sw != cur_w) {
             HDC srcDC = CreateCompatibleDC(NULL);
@@ -162,8 +169,8 @@ HBITMAP GetAlbumArt(const std::wstring& filename, const std::wstring& type) {
     return 0;
 }
 
-RandomAccessStreamReference GetThumbnailStream(HBITMAP bmp) {
-    PICTDESC pd;
+static RandomAccessStreamReference getThumbnailStream(HBITMAP bmp) {
+    PICTDESC pd{};
     pd.cbSizeofstruct = sizeof(pd);
     pd.picType = PICTYPE_BITMAP;
     pd.bmp.hbitmap = bmp;
@@ -174,7 +181,8 @@ RandomAccessStreamReference GetThumbnailStream(HBITMAP bmp) {
     winrt::com_ptr<IStream> stream;
     winrt::check_hresult(CreateStreamOnHGlobal(nullptr, TRUE, stream.put()));
 
-    winrt::check_hresult(pict->SaveAsFile(stream.get(), TRUE, nullptr));
+    LONG fsz = 0;
+    winrt::check_hresult(pict->SaveAsFile(stream.get(), TRUE, &fsz));
 
     winrt::com_ptr<ABI::Windows::Storage::Streams::IRandomAccessStream> outstream;
     winrt::check_hresult(CreateRandomAccessStreamOverStream(stream.get(), BSOS_DEFAULT, IID_PPV_ARGS(outstream.put())));
@@ -182,7 +190,7 @@ RandomAccessStreamReference GetThumbnailStream(HBITMAP bmp) {
     return RandomAccessStreamReference::CreateFromStream(outstream.as<IRandomAccessStream>());
 }
 
-void updateMeta() {
+static void updateMeta() {
     auto du = smtc.DisplayUpdater();
 
     du.ClearAll();
@@ -193,13 +201,13 @@ void updateMeta() {
     auto _filename = (wchar_t*)SendMessage(plugin.hwndParent, WM_WA_IPC, 0, IPC_GET_PLAYING_FILENAME);
     if (_filename && *_filename) {
         auto filename = std::wstring(_filename);
-        mp.Title(GetMetadata(filename, L"title"));
-        mp.Artist(GetMetadata(filename, L"artist"));
-        mp.AlbumTitle(GetMetadata(filename, L"album"));
+        mp.Title(getMetadata(filename, L"title"));
+        mp.Artist(getMetadata(filename, L"artist"));
+        mp.AlbumTitle(getMetadata(filename, L"album"));
 
-        auto art = GetAlbumArt(filename, L"cover");
+        auto art = getAlbumArt(filename, L"cover");
         if (art) {
-            du.Thumbnail(GetThumbnailStream(art));
+            du.Thumbnail(getThumbnailStream(art));
         }
     } else {
         auto title = std::wstring((wchar_t*)SendMessage(plugin.hwndParent, WM_WA_IPC, 0, IPC_GET_PLAYING_TITLE));
@@ -209,7 +217,7 @@ void updateMeta() {
     du.Update();
 }
 
-void _buttonPressed(const SystemMediaTransportControls& sender, const winrt::Windows::Media::SystemMediaTransportControlsButtonPressedEventArgs& args) {
+static void onButtonPressed(const SystemMediaTransportControls& sender, const SystemMediaTransportControlsButtonPressedEventArgs& args) {
     switch (args.Button()) {
     case SystemMediaTransportControlsButton::Play:
         SendMessage(plugin.hwndParent, WM_COMMAND, WINAMP_BUTTON2, 0);
@@ -225,17 +233,14 @@ void _buttonPressed(const SystemMediaTransportControls& sender, const winrt::Win
         break;
     }
 }
-TypedEventHandler<SystemMediaTransportControls, winrt::Windows::Media::SystemMediaTransportControlsButtonPressedEventArgs> buttonPressed(_buttonPressed);
 
-WNDPROC lpWndProcOld;
-
-LRESULT CALLBACK WindowProc(
+static LRESULT CALLBACK windowProc(
     _In_ HWND   hwnd,
     _In_ UINT   uMsg,
     _In_ WPARAM wParam,
     _In_ LPARAM lParam
 ) {
-    if (lParam == IPC_CB_MISC) {
+    if (enabled && lParam == IPC_CB_MISC) {
         switch (wParam) {
         case IPC_CB_MISC_STATUS:
             updateStatus();
@@ -246,10 +251,10 @@ LRESULT CALLBACK WindowProc(
         }
     }
 
-    return CallWindowProc(lpWndProcOld, hwnd, uMsg, wParam, lParam);
+    return CallWindowProc(windowProcOld, hwnd, uMsg, wParam, lParam);
 }
 
-int init() {
+static int init() {
     if (!IsWindows10OrGreater()) {
         return 1;
     }
@@ -259,20 +264,11 @@ int init() {
         return 1;
     }
 
-    {
-        waServiceFactory* sf = serviceApi->service_getServiceByGuid(memMgrApiServiceGuid);
-        memmgrApi = reinterpret_cast<api_memmgr*>(sf->getInterface());
-    }
+    memmgrApi = reinterpret_cast<api_memmgr*>(serviceApi->service_getServiceByGuid(memMgrApiServiceGuid)->getInterface());
+    albumartApi = reinterpret_cast<api_albumart*>(serviceApi->service_getServiceByGuid(albumArtGUID)->getInterface());
 
-    {
-        waServiceFactory* sf = serviceApi->service_getServiceByGuid(albumArtGUID);
-        albumartApi = reinterpret_cast<api_albumart*>(sf->getInterface());
-    }
-
-    lpWndProcOld = (WNDPROC)SetWindowLong(plugin.hwndParent, GWL_WNDPROC, (LONG)WindowProc);
-
-    smtc = make_smtc(&plugin);
-    smtc_buttonPressed_token = smtc.ButtonPressed(buttonPressed);
+    smtc = makeSmtc(&plugin);
+    buttonPressedToken = smtc.ButtonPressed(buttonPressedHandler);
 
     smtc.IsPlayEnabled(true);
     smtc.IsPauseEnabled(true);
@@ -280,14 +276,16 @@ int init() {
     smtc.IsPreviousEnabled(true);
     smtc.IsEnabled(true);
 
+    windowProcOld = (WNDPROC)SetWindowLong(plugin.hwndParent, GWL_WNDPROC, (LONG)windowProc);
+
     return 0;
 }
 
-void config() {
+static void config() {
 }
 
-void quit() {
-    SetWindowLong(plugin.hwndParent, GWL_WNDPROC, (LONG)lpWndProcOld);
-    smtc.ButtonPressed(smtc_buttonPressed_token);
+static void quit() {
+    enabled = false;
+    smtc.ButtonPressed(buttonPressedToken);
     smtc = { nullptr };
 }
