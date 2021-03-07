@@ -23,9 +23,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="cpp.hint" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="plugin.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

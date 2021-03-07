@@ -25,9 +25,6 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="winampcmd.h" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="cpp.hint" />
-  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <ProjectGuid>{25FB00F9-AC2A-4822-9753-7B8B186EBF72}</ProjectGuid>
